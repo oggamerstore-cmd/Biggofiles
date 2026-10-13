@@ -1,0 +1,32 @@
+name: Windows build and tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build, test, and package
+        shell: powershell
+        run: .\build.ps1 -Test -Package
+      - name: Upload portable application
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: Biggofiles-win-x64
+          path: release/*
+      - name: Upload interface screenshots
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: Interface-screenshots
+          path: docs/*.png
