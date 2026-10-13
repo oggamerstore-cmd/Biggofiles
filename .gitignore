@@ -1,0 +1,11 @@
+dist/
+release/
+github/
+tests/bin/
+.test-work/
+*.user
+*.suo
+.vs/
+docs/minimum-window.png
+docs/about.png
+docs/size-explanation.png
