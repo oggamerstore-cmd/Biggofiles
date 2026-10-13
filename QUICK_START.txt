@@ -1,0 +1,41 @@
+Biggofiles v1.0
+by OG STUDIO
+
+1. Extract the ZIP to a folder.
+2. Open Biggofiles.exe. Keep Biggofiles.exe.config beside it.
+3. Choose a drive or folder, then click Scan location.
+4. Your largest files appear first. Search, filter, or change the sort order.
+5. Double-click a file to open its containing folder and select it in Explorer.
+6. Scan again refreshes changed folders using the NTFS journal where available.
+7. Review cleanup suggests older large files only after verifying a backup.
+8. Use Switch to light theme in the sidebar for a light interface.
+   Dark is the default each time the app starts.
+
+Windows 10/11, 64-bit, with .NET Framework 4.8 required.
+No installation, account, or network connection needed.
+The executable is unsigned.
+
+Ctrl+F: search. F5: scan again. Shift+F5: fresh scan. Esc: stop scanning.
+Stopping keeps partial results. Final results have no file-count cap.
+The index stays in memory for this app session. After closing the app, the
+next scan builds a fresh index. No index is saved to disk.
+
+Windows, boot/recovery, registry, application and profile files are protected
+from recycling. Windows Resource Protection and shared hard links are checked
+before recycling. Suggestions do not mean a file is unused or backed up.
+
+Windows permissions can prevent a complete drive scan. Read Scan details for
+skipped locations. Administrator access can expose more protected folders.
+Encountered directory links and mount points are not followed.
+
+Sizes are logical file sizes, not necessarily physical disk usage or space
+you will recover. Hard links appear separately. Cloud and sparse files may
+use far less disk space than their listed size.
+
+Recycled files still occupy space until you empty the Windows Recycle Bin.
+Biggofiles does not empty it. Review files before choosing to remove them.
+
+Website: https://ogstudioapps.com/bf/
+Privacy: https://ogstudioapps.com/bf/pp.html
+
+MIT License. Copyright (c) 2026 OG STUDIO.

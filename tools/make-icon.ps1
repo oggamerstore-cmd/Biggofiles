@@ -1,0 +1,30 @@
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+$assetRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
+New-Item -ItemType Directory -Path $assetRoot -Force | Out-Null
+$bitmap = [System.Drawing.Bitmap]::new(256,256)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+$graphics.Clear([System.Drawing.Color]::Transparent)
+$path = [System.Drawing.Drawing2D.GraphicsPath]::new()
+$path.AddArc(8,8,70,70,180,90)
+$path.AddArc(178,8,70,70,270,90)
+$path.AddArc(178,178,70,70,0,90)
+$path.AddArc(8,178,70,70,90,90)
+$path.CloseFigure()
+$lime = [System.Drawing.SolidBrush]::new([System.Drawing.ColorTranslator]::FromHtml('#D5F58A'))
+$ink = [System.Drawing.SolidBrush]::new([System.Drawing.ColorTranslator]::FromHtml('#22301C'))
+$graphics.FillPath($lime,$path)
+$graphics.FillRectangle($ink,62,68,132,22)
+$graphics.FillRectangle($ink,62,117,94,22)
+$graphics.FillRectangle($ink,62,166,52,22)
+$png = [System.IO.MemoryStream]::new()
+$bitmap.Save($png,[System.Drawing.Imaging.ImageFormat]::Png)
+$bytes = $png.ToArray()
+$iconStream = [System.IO.File]::Create((Join-Path $assetRoot 'App.ico'))
+$writer = [System.IO.BinaryWriter]::new($iconStream)
+$writer.Write([uint16]0); $writer.Write([uint16]1); $writer.Write([uint16]1)
+$writer.Write([byte]0); $writer.Write([byte]0); $writer.Write([byte]0); $writer.Write([byte]0)
+$writer.Write([uint16]1); $writer.Write([uint16]32); $writer.Write([uint32]$bytes.Length); $writer.Write([uint32]22)
+$writer.Write($bytes)
+$writer.Dispose(); $png.Dispose(); $graphics.Dispose(); $bitmap.Dispose(); $path.Dispose(); $lime.Dispose(); $ink.Dispose()
