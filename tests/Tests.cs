@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -64,11 +65,16 @@ namespace Biggofiles
                 Run("Windows Recycle Bin receives a disposable test file", ActualRecycle);
                 Run("Million-file query stays correct with deterministic ordering", MillionFiles);
                 Run("Million-file progress stays bounded and matches complete results", MillionFileProgress);
-                Run("Real NTFS journal refresh matches a fresh scan through edits, moves and deletes", JournalRefresh);
+                bool nativeJournal = NativeJournalAvailable();
+                Run("Native scans match fresh enumeration through edits, moves and deletes", () => JournalRefresh("native", nativeJournal));
+                Run("Controlled journal refresh handles edits, moves, replacements and hard links", () => JournalRefresh("controlled", true, new FakeJournal()));
+                Run("Without a journal, repeat scans stay accurate through every file change", () => JournalRefresh("unavailable", false, null, true));
                 Run("Unclosed writers are refreshed even when journal reasons coalesce", OpenWriter);
                 Run("Changes during a first scan are replayed on refresh", DuringScan);
                 Run("Journal reset, overflow, security changes and failures force a fresh scan", JournalFallback);
-                Run("Permission changes rebuild affected trees and preserve unrelated cached folders", PermissionRefresh);
+                Run("Native permission changes hide and restore affected trees", () => PermissionRefresh("native", nativeJournal));
+                Run("Controlled permission changes invalidate only affected cached trees", () => PermissionRefresh("controlled", true, new FakeJournal()));
+                Run("Without a journal, permission changes never reuse inaccessible descendants", () => PermissionRefresh("unavailable", false, null, true));
                 Run("Backup-first suggestions exclude protected and recent files", Suggestions);
                 Run("Boot, profile, application and hard-link files cannot be recycled", ExtendedProtection);
                 Run("Native WPF interface scans, filters, scrolls and renders", UserInterface);
@@ -222,27 +228,87 @@ namespace Biggofiles
         }
         private static string[] Fingerprint(ScanResult result) { return result.Files.Select(f => f.FullPath + "|" + f.Size + "|" + f.Attributes).OrderBy(x => x, StringComparer.Ordinal).ToArray(); }
         private static void SameAsFresh(string folder, ScanResult result) { Assert(Fingerprint(result).SequenceEqual(Fingerprint(new ReferenceScanner().Scan(folder, CancellationToken.None, null))), "Incremental index differs from independent recursive enumeration."); }
-        private static void JournalRefresh()
+        private static bool NativeJournalAvailable()
         {
-            string folder = Folder("journal"), one = Path.Combine(folder, "one"), two = Path.Combine(folder, "two"); Directory.CreateDirectory(one); Directory.CreateDirectory(two);
+            string volume = Path.GetPathRoot(NativeFiles.ResolvedPath(root));
+            using (var journal = UsnJournal.TryOpen(volume))
+            {
+                if (journal == null) { Console.WriteLine("  Native journal unavailable on " + volume + "; verifying full-scan fallback. Controlled journal tests still require fast refresh."); return false; }
+                try
+                {
+                    // Probe Windows directly, independently of the scanner's cache/fallback decision.
+                    var state = journal.Query();
+                    var retained = journal.Read(Math.Max(state.FirstUsn, state.LowestValidUsn), state, CancellationToken.None, true);
+                    Assert(!retained.UnsupportedRecords, "Native journal probe found an unsupported record format.");
+                    journal.Read(state.NextUsn, journal.Query(), CancellationToken.None);
+                    Console.WriteLine("  Native journal readable on " + volume + "; native tests require fast refresh."); return true;
+                }
+                catch (Win32Exception ex)
+                {
+                    // Expected capability limits only. Bad parameters, malformed records and other
+                    // unexpected failures must fail the suite instead of silently reducing coverage.
+                    if (!IsJournalUnavailable(ex.NativeErrorCode)) throw;
+                    Console.WriteLine("  Native journal unavailable on " + volume + " (Windows error " + ex.NativeErrorCode + ": " + ex.Message + "); verifying full-scan fallback. Controlled journal tests still require fast refresh."); return false;
+                }
+            }
+        }
+        private static bool IsJournalUnavailable(int error)
+        {
+            return error == 1 || error == 5 || error == 50 || error == 1178 || error == 1179;
+        }
+        private static DriveScanner RefreshScanner(FakeJournal fake, bool withoutJournal)
+        {
+            var scanner = new DriveScanner();
+            if (fake != null) scanner.JournalFactory = p => fake;
+            else if (withoutJournal) scanner.JournalFactory = p => new FakeJournal { QueryError = 1179 };
+            return scanner;
+        }
+        private static void AssertRefresh(ScanResult result, bool expectJournal)
+        {
+            string expected = expectJournal ? "Journal refresh" : "Full scan";
+            Assert(result.Method == expected, "Expected " + expected + ", got " + result.Method + ": " + result.IndexNote);
+            if (!expectJournal) Assert(result.ReusedFolders == 0, "Unavailable journal reused cached folders.");
+        }
+        private static FileIdentity IdentityOf(string path)
+        {
+            using (var handle = BulkDirectory.Open(path, 0)) { ulong serial; var id = BulkDirectory.Identify(handle, out serial); Assert(!id.IsEmpty, "Fixture has no file identity: " + path); return id; }
+        }
+        private static void RecordChange(FakeJournal fake, string parent, string path, bool security = false)
+        {
+            if (fake == null) return;
+            var delta = new JournalDelta(); delta.ParentIds.Add(IdentityOf(parent));
+            if (path != null) { var id = IdentityOf(path); delta.FileIds.Add(id); if (security) delta.SecurityDirectoryIds.Add(id); }
+            fake.Append(delta);
+        }
+        private static void JournalRefresh(string mode, bool expectJournal, FakeJournal fake = null, bool withoutJournal = false)
+        {
+            string folder = Folder("journal-" + mode), one = Path.Combine(folder, "one"), two = Path.Combine(folder, "two"); Directory.CreateDirectory(one); Directory.CreateDirectory(two);
             string changing = FileOfSize(one, "change.bin", 10), deleted = FileOfSize(two, "delete.bin", 20);
             FileOfSize(one, "move.txt", 30); Directory.CreateDirectory(Path.Combine(one, "nested")); FileOfSize(Path.Combine(one, "nested"), "nested.txt", 40);
-            var scanner = new DriveScanner(); scanner.Scan(folder, CancellationToken.None, null);
+            var scanner = RefreshScanner(fake, withoutJournal); scanner.Scan(folder, CancellationToken.None, null);
             var unchanged = scanner.Scan(folder, CancellationToken.None, null);
-            Assert(unchanged.Method == "Journal refresh", "Journal path unavailable: " + unchanged.IndexNote);
-            Assert(unchanged.FoldersRead == 0, "Unchanged folders were needlessly rescanned."); SameAsFresh(folder, unchanged);
+            AssertRefresh(unchanged, expectJournal);
+            if (expectJournal) Assert(unchanged.FoldersRead == 0, "Unchanged folders were needlessly rescanned."); SameAsFresh(folder, unchanged);
+            RecordChange(fake, one, changing); RecordChange(fake, two, deleted); RecordChange(fake, one, Path.Combine(one, "move.txt"));
             using (var stream = new FileStream(changing, FileMode.Open)) stream.SetLength(120);
             File.Delete(deleted); FileOfSize(two, "new 日本.txt", 57); File.Move(Path.Combine(one, "move.txt"), Path.Combine(two, "renamed.txt"));
-            var edited = scanner.Scan(folder, CancellationToken.None, null); Assert(edited.Method == "Journal refresh", "Edit refresh unexpectedly fell back."); SameAsFresh(folder, edited);
+            RecordChange(fake, two, Path.Combine(two, "new 日本.txt")); RecordChange(fake, two, Path.Combine(two, "renamed.txt"));
+            var edited = scanner.Scan(folder, CancellationToken.None, null); AssertRefresh(edited, expectJournal); SameAsFresh(folder, edited);
+            RecordChange(fake, folder, one);
             Directory.Move(one, Path.Combine(folder, "renamed-directory"));
-            var renamed = scanner.Scan(folder, CancellationToken.None, null); SameAsFresh(folder, renamed);
+            RecordChange(fake, folder, Path.Combine(folder, "renamed-directory"));
+            var renamed = scanner.Scan(folder, CancellationToken.None, null); AssertRefresh(renamed, expectJournal); SameAsFresh(folder, renamed);
+            RecordChange(fake, folder, two);
             Directory.Delete(two, true); Directory.CreateDirectory(two); FileOfSize(two, "replacement.txt", 8);
-            SameAsFresh(folder, scanner.Scan(folder, CancellationToken.None, null));
+            RecordChange(fake, folder, two);
+            var replaced = scanner.Scan(folder, CancellationToken.None, null); AssertRefresh(replaced, expectJournal); SameAsFresh(folder, replaced);
             string alias = Path.Combine(folder, "hardlink.bin"); string original = Path.Combine(folder, "renamed-directory", "change.bin"); Assert(CreateHardLinkW(alias, original, IntPtr.Zero), "Hardlink creation failed.");
-            SameAsFresh(folder, scanner.Scan(folder, CancellationToken.None, null));
+            RecordChange(fake, folder, alias);
+            var linked = scanner.Scan(folder, CancellationToken.None, null); AssertRefresh(linked, expectJournal); SameAsFresh(folder, linked);
             using (var stream = new FileStream(original, FileMode.Open)) stream.SetLength(900);
-            SameAsFresh(folder, scanner.Scan(folder, CancellationToken.None, null));
-            var forced = scanner.Scan(folder, CancellationToken.None, null, true); Assert(forced.Method == "Full scan" && forced.ReusedFolders == 0, "Forced full scan didn't rebuild.");
+            RecordChange(fake, Path.GetDirectoryName(original), original);
+            var resized = scanner.Scan(folder, CancellationToken.None, null); AssertRefresh(resized, expectJournal); SameAsFresh(folder, resized);
+            var forced = scanner.Scan(folder, CancellationToken.None, null, true); AssertRefresh(forced, false); SameAsFresh(folder, forced);
         }
         private static void OpenWriter()
         {
@@ -269,8 +335,22 @@ namespace Biggofiles
         {
             public JournalState State = new JournalState { Id = 1, NextUsn = 100 };
             public bool Fail, Security;
-            public JournalState Query() { return new JournalState { Id = State.Id, FirstUsn = State.FirstUsn, NextUsn = State.NextUsn, LowestValidUsn = State.LowestValidUsn }; }
-            public JournalDelta Read(long from, JournalState until, CancellationToken token, bool pendingOnly = false) { if (Fail) throw new IOException("Injected read failure"); return new JournalDelta { RequiresFullScan = Security }; }
+            public int QueryError;
+            private readonly List<KeyValuePair<long, JournalDelta>> changes = new List<KeyValuePair<long, JournalDelta>>();
+            public void Append(JournalDelta delta) { changes.Add(new KeyValuePair<long, JournalDelta>(State.NextUsn++, delta)); }
+            public JournalState Query() { if (QueryError != 0) throw new Win32Exception(QueryError); return new JournalState { Id = State.Id, FirstUsn = State.FirstUsn, NextUsn = State.NextUsn, LowestValidUsn = State.LowestValidUsn }; }
+            public JournalDelta Read(long from, JournalState until, CancellationToken token, bool pendingOnly = false)
+            {
+                if (Fail) throw new IOException("Injected read failure");
+                var result = new JournalDelta { RequiresFullScan = Security };
+                foreach (var change in changes)
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (change.Key < from || change.Key >= until.NextUsn || pendingOnly) continue;
+                    result.ParentIds.UnionWith(change.Value.ParentIds); result.FileIds.UnionWith(change.Value.FileIds); result.SecurityDirectoryIds.UnionWith(change.Value.SecurityDirectoryIds);
+                }
+                return result;
+            }
             public void Dispose() { }
         }
         private static void JournalFallback()
@@ -296,35 +376,40 @@ namespace Biggofiles
             Assert(CleanupAdvisor.Reason(new FileEntry("D:\\User\\Downloads", "setup.exe", 90L * 1024 * 1024, old, 0), now) != null, "Downloaded installer wasn't suggested.");
             Assert(CleanupAdvisor.Reason(new FileEntry("D:\\DownloadsArchive", "setup.exe", 90L * 1024 * 1024, old, 0), now) == null, "Unrelated application folder suggested.");
         }
-        private static void PermissionRefresh()
+        private static void PermissionRefresh(string mode, bool expectJournal, FakeJournal fake = null, bool withoutJournal = false)
         {
-            string folder = Folder("permission-refresh"), branch = Path.Combine(folder, "branch"), nested = Path.Combine(branch, "nested"), sibling = Path.Combine(folder, "sibling");
+            string folder = Folder("permission-refresh-" + mode), branch = Path.Combine(folder, "branch"), nested = Path.Combine(branch, "nested"), sibling = Path.Combine(folder, "sibling");
             Directory.CreateDirectory(nested); Directory.CreateDirectory(sibling);
             FileOfSize(branch, "one", 1); FileOfSize(nested, "two", 2); FileOfSize(sibling, "three", 3);
-            var scanner = new DriveScanner(); scanner.Scan(folder, CancellationToken.None, null);
+            var scanner = RefreshScanner(fake, withoutJournal); scanner.Scan(folder, CancellationToken.None, null);
             var acl = Directory.GetAccessControl(branch);
             var deny = new FileSystemAccessRule(WindowsIdentity.GetCurrent().User, FileSystemRights.ListDirectory, AccessControlType.Deny);
             acl.AddAccessRule(deny); Directory.SetAccessControl(branch, acl);
             try
             {
+                RecordChange(fake, folder, branch, true);
                 var denied = scanner.Scan(folder, CancellationToken.None, null);
-                Assert(denied.Method == "Journal refresh" && denied.ReusedFolders > 0 && denied.Files.Count == 1, "Permission change either rebuilt unrelated folders or retained inaccessible descendants.");
+                Assert(denied.Files.Count == 1 && denied.Files[0].Name == "three", "Permission change retained inaccessible descendants.");
+                Assert(denied.Issues.Any(i => i.Path == branch), "Denied subtree was not reported.");
+                AssertRefresh(denied, expectJournal);
+                if (expectJournal) Assert(denied.ReusedFolders > 0, "Permission change rebuilt unrelated cached folders.");
                 SameAsFresh(folder, denied);
             }
             finally { acl.RemoveAccessRuleSpecific(deny); Directory.SetAccessControl(branch, acl); }
+            RecordChange(fake, folder, branch, true);
             var restored = scanner.Scan(folder, CancellationToken.None, null);
-            Assert(restored.Method == "Journal refresh" && restored.Files.Count == 3, "Newly accessible subtree was not restored."); SameAsFresh(folder, restored);
+            Assert(restored.Files.Count == 3, "Newly accessible subtree was not restored."); AssertRefresh(restored, expectJournal); SameAsFresh(folder, restored);
 
-            string unrelated = Folder("unrelated-permission"); var unrelatedAcl = Directory.GetAccessControl(unrelated);
+            string unrelated = Folder("unrelated-permission-" + mode); var unrelatedAcl = Directory.GetAccessControl(unrelated);
             unrelatedAcl.AddAccessRule(deny); Directory.SetAccessControl(unrelated, unrelatedAcl);
-            try { Assert(scanner.Scan(folder, CancellationToken.None, null).Method == "Journal refresh", "Unrelated permission change forced a full rebuild."); }
+            try { RecordChange(fake, root, unrelated, true); var unchanged = scanner.Scan(folder, CancellationToken.None, null); AssertRefresh(unchanged, expectJournal); if (expectJournal) Assert(unchanged.FoldersRead == 0, "Unrelated permission change reread cached folders."); SameAsFresh(folder, unchanged); }
             finally { unrelatedAcl.RemoveAccessRuleSpecific(deny); Directory.SetAccessControl(unrelated, unrelatedAcl); }
 
             // An ancestor outside the selected root can change effective access.
-            var nestedScanner = new DriveScanner(); nestedScanner.Scan(nested, CancellationToken.None, null);
+            var nestedScanner = RefreshScanner(fake, withoutJournal); nestedScanner.Scan(nested, CancellationToken.None, null);
             var allow = new FileSystemAccessRule(WindowsIdentity.GetCurrent().User, FileSystemRights.ListDirectory, AccessControlType.Allow);
             acl.AddAccessRule(allow); Directory.SetAccessControl(branch, acl);
-            try { Assert(nestedScanner.Scan(nested, CancellationToken.None, null).Method == "Full scan", "Ancestor permission change incorrectly reused nested results."); }
+            try { RecordChange(fake, folder, branch, true); var rebuilt = nestedScanner.Scan(nested, CancellationToken.None, null); AssertRefresh(rebuilt, false); SameAsFresh(nested, rebuilt); }
             finally { acl.RemoveAccessRuleSpecific(allow); Directory.SetAccessControl(branch, acl); }
         }
         private static void ExtendedProtection()

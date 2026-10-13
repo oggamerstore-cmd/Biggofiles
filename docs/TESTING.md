@@ -31,7 +31,7 @@ An earlier progress-enabled scanner-only run in the same session completed C: in
 
 ## Automated coverage
 
-All **24 integration groups** pass with compiler warnings treated as errors:
+All **28 integration groups** pass locally with compiler warnings treated as errors. The original 24 groups cover:
 
 1. Hidden, system, zero-byte, Unicode, extensionless, and locked files.
 2. File sizes above 5 GB.
@@ -60,6 +60,14 @@ All **24 integration groups** pass with compiler warnings treated as errors:
 
 Dark, light, cleanup, empty, and minimum-size screens are rendered from actual WPF controls. Screenshots use generated sparse files, not personal file inventories. A 100,000-record list realized only four rows at the tested size.
 
+## Change-journal availability in CI
+
+The first GitHub Actions run failed two tests that required journal refresh unconditionally. The scanner reported that it could not verify change history and used a full scan. The log did not include the underlying Windows error, so the exact runner limitation was not established. NTFS alone does not guarantee an active, readable change journal.
+
+The suite now queries and reads the native journal directly before deciding which scan method the native fixtures must use. Expected Windows capability errors (unsupported operation, access denied, or an inactive/deleting journal) are printed with their numeric code. Unexpected errors and malformed journal responses still fail the suite. When the probe succeeds, native tests still require journal refresh; a scanner regression cannot excuse itself by falling back.
+
+Four additional groups run on every host: both the file-change and permission-change scenarios run with controlled journal records and again with Windows error 1179 (`ERROR_JOURNAL_NOT_ACTIVE`) injected at the journal query. Controlled records require incremental refresh, zero folder reads for unchanged scans, and reuse of unrelated folders. The inactive-journal cases require full scans with no cache reuse. All variants compare paths, sizes, and attributes against independent enumeration after changes. Real ACL denial, restoration, and coverage notes remain mandatory. Tests do not enable or disable the machine's journal.
+
 ## Reproduce
 
 Build and run fixture tests with `build.ps1 -Test`. Then use the test executable with `--benchmark C:\` for progress-enabled scanner/comparison measurements, or `--benchmark-ui C:\` for two actual-interface scans. Replace C: with the intended drive. Benchmark output contains counts and timing, not personal filenames. The interface benchmark window is off-screen and closes when finished.
@@ -70,4 +78,4 @@ Tests create fixtures under `.test-work`, restore temporary access rules, and re
 
 See [scanning architecture](SCANNING.md) for retained history, long-lived writers, live-volume consistency, logical sizes, and permission limits. No 100% access or zero-error guarantee is made.
 
-Local NTFS and Shell integration were tested. Network shares, removable file systems, cloud providers, mixed-DPI transitions, and separate Windows 10 installations need field testing. Raw-MFT scanning has not been benchmarked. GitHub automation is prepared but has not run remotely. The local build is unsigned; no public release has been published.
+Local NTFS and Shell integration were tested. Network shares, removable file systems, cloud providers, mixed-DPI transitions, and separate Windows 10 installations need field testing. Raw-MFT scanning has not been benchmarked. The first GitHub Actions run exposed the journal-dependent test assumptions described above; the corrected suite has passed locally, and a new remote run is still needed. The local build is unsigned.
